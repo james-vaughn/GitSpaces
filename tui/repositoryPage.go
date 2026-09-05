@@ -130,6 +130,8 @@ type RepositoryPage struct {
 	Existing    []spaceOption
 	NameOnInput bool
 	NameIdx     int
+	Confirming  bool
+	Pending     string
 	Err         error
 }
 
@@ -183,6 +185,7 @@ func repoHelpKeys() []key.Binding {
 func spaceHelpKeys() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open space")),
+		key.NewBinding(key.WithKeys("backspace"), key.WithHelp("backspace", "delete space")),
 		key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch pane")),
 	}
 }
@@ -292,6 +295,10 @@ func firstEnabled(opts []spaceOption) int {
 		}
 	}
 	return 0
+}
+
+func deleteSpace(root, name string) error {
+	return os.RemoveAll(filepath.Join(root, spacesFolder, name))
 }
 
 func (p *RepositoryPage) nameMove(delta int) {
@@ -419,6 +426,22 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 			return p, nil
 
 		default:
+			if p.Confirming {
+				switch msg.String() {
+				case "y", "Y":
+					if err := deleteSpace(p.Dir, p.Pending); err != nil {
+						p.Err = err
+					}
+					p.Confirming = false
+					p.Pending = ""
+					return p, p.Spaces.SetItems(readSpaceItems(p.Dir))
+				case "n", "N", "esc":
+					p.Confirming = false
+					p.Pending = ""
+				}
+				return p, nil
+			}
+
 			focused := &p.List
 			if p.Focus == focusSpaces {
 				focused = &p.Spaces
@@ -428,6 +451,16 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 			}
 
 			switch msg.String() {
+			case "backspace", "delete":
+				if p.Focus == focusSpaces {
+					if it, ok := p.Spaces.SelectedItem().(spaceItem); ok {
+						p.Confirming = true
+						p.Pending = it.Name
+						p.Err = nil
+					}
+					return p, nil
+				}
+
 			case "tab":
 				if p.Focus == focusRepos {
 					p.Focus = focusSpaces
@@ -517,7 +550,9 @@ func (p *RepositoryPage) View() string {
 
 	default:
 		view := p.List.View() + "\n" + p.Spaces.View()
-		if p.Err != nil {
+		if p.Confirming {
+			view += "\n" + confirmStyle.Render(fmt.Sprintf("Delete space %q? This permanently removes the folder and all its repos.  y / n", p.Pending))
+		} else if p.Err != nil {
 			view += "\n" + errStyle.Render(p.Err.Error())
 		}
 		return docStyle.Render(view)
