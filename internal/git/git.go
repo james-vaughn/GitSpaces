@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -8,12 +9,31 @@ import (
 	"strings"
 )
 
-func Clone(src, dst string) error {
-	return run(exec.Command("git", "clone", src, dst))
+func Clone(ctx context.Context, src, dst string) error {
+	return run(exec.CommandContext(ctx, "git", "clone", src, dst))
 }
 
-func Checkout(repo, branch string) error {
-	return run(exec.Command("git", "-C", repo, "checkout", "-B", branch))
+func Checkout(repo, branch, start string) error {
+	args := []string{"-C", repo, "checkout", "-B", branch}
+	if start != "" {
+		args = append(args, "--no-track", start)
+	}
+	return run(exec.Command("git", args...))
+}
+
+func RemoteURL(repo string) (string, error) {
+	out, err := output(exec.Command("git", "-C", repo, "remote", "get-url", "origin"))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func SetUpstream(repo, branch string) error {
+	if err := run(exec.Command("git", "-C", repo, "config", "branch."+branch+".remote", "origin")); err != nil {
+		return err
+	}
+	return run(exec.Command("git", "-C", repo, "config", "branch."+branch+".merge", "refs/heads/"+branch))
 }
 
 func Fetch(repo string) error {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,7 @@ func (i spaceItem) FilterValue() string { return i.Name }
 
 type repoCloneDoneMsg struct {
 	Repo string
+	Gen  int
 	Err  error
 }
 
@@ -137,6 +139,8 @@ type RepositoryPage struct {
 	CloneName   string
 	CloneRepos  []string
 	CloneDone   map[string]error
+	CloneGen    int
+	CloneCancel context.CancelFunc
 	Err         error
 }
 
@@ -266,22 +270,62 @@ func (p *RepositoryPage) nameMove(delta int) {
 	}
 }
 
-func cloneCmd(root, name, repo string) tea.Cmd {
+func cloneCmd(ctx context.Context, gen int, root, name, repo string) tea.Cmd {
 	return func() tea.Msg {
-		dst := space.RepoPath(space.Path(root, name), repo)
+		spaceDir := space.Path(root, name)
+		dst := space.RepoPath(spaceDir, repo)
+
+		done := func(err error) tea.Msg {
+			return repoCloneDoneMsg{Repo: repo, Gen: gen, Err: err}
+		}
+
+		abandon := func() tea.Msg {
+			space.RemoveRepo(spaceDir, repo)
+			return done(nil)
+		}
+
 		if space.Exists(dst) {
-			return repoCloneDoneMsg{Repo: repo}
+			return done(nil)
 		}
 
-		if err := git.Clone(filepath.Join(root, repo), dst); err != nil {
-			return repoCloneDoneMsg{Repo: repo, Err: fmt.Errorf("clone %s: %w", repo, err)}
+		url, err := git.RemoteURL(filepath.Join(root, repo))
+		if err != nil {
+			return done(fmt.Errorf("remote for %s: %w", repo, err))
 		}
 
-		if err := git.Checkout(dst, name); err != nil {
-			return repoCloneDoneMsg{Repo: repo, Err: fmt.Errorf("checkout %s in %s: %w", name, repo, err)}
+		if err := git.Clone(ctx, url, dst); err != nil {
+			if ctx.Err() != nil {
+				return abandon()
+			}
+			return done(fmt.Errorf("clone %s: %w", repo, err))
 		}
 
-		return repoCloneDoneMsg{Repo: repo}
+		if ctx.Err() != nil {
+			return abandon()
+		}
+
+		start := ""
+		if base := git.BaseBranch(dst); base != "" {
+			start = "origin/" + base
+		}
+
+		if err := git.Checkout(dst, name, start); err != nil {
+			return done(fmt.Errorf("checkout %s in %s: %w", name, repo, err))
+		}
+
+		if err := git.SetUpstream(dst, name); err != nil {
+			return done(fmt.Errorf("track %s in %s: %w", name, repo, err))
+		}
+
+		return done(nil)
+	}
+}
+
+func (p *RepositoryPage) stopClone() {
+	p.CloneGen++
+	if p.CloneCancel != nil {
+		p.CloneCancel()
+		p.CloneCancel = nil
 	}
 }
 
@@ -317,11 +361,16 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 		return p, nil
 
 	case repoCloneDoneMsg:
+		if msg.Gen != p.CloneGen {
+			return p, nil
+		}
+
 		p.CloneDone[msg.Repo] = msg.Err
 		if len(p.CloneDone) < len(p.CloneRepos) {
 			return p, nil
 		}
 
+		p.stopClone()
 		p.Mode = modeBrowse
 		refresh := p.Spaces.SetItems(spaceItems(p.Dir))
 		if errs := p.cloneErrors(); len(errs) > 0 {
@@ -335,6 +384,12 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch p.Mode {
 		case modeCloning:
+			if msg.String() == "esc" {
+				p.stopClone()
+				p.Mode = modeBrowse
+				p.Err = nil
+				return p, p.Spaces.SetItems(spaceItems(p.Dir))
+			}
 			return p, nil
 
 		case modeNaming:
@@ -385,10 +440,14 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 				p.CloneName = name
 				p.CloneRepos = p.selectedNames()
 				p.CloneDone = map[string]error{}
+				p.CloneGen++
+
+				ctx, cancel := context.WithCancel(context.Background())
+				p.CloneCancel = cancel
 
 				cmds := make([]tea.Cmd, len(p.CloneRepos))
 				for i, r := range p.CloneRepos {
-					cmds[i] = cloneCmd(p.Dir, name, r)
+					cmds[i] = cloneCmd(ctx, p.CloneGen, p.Dir, name, r)
 				}
 				return p, tea.Batch(cmds...)
 			}
@@ -536,6 +595,7 @@ func (p *RepositoryPage) View() string {
 				body += okStyle.Render("  ✓ "+r) + "\n"
 			}
 		}
+		body += "\n" + hintStyle.Render("esc: cancel")
 		return docStyle.Render(body)
 
 	default:
