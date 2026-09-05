@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/james-vaughn/GitSpaces/internal/git"
 	"github.com/james-vaughn/GitSpaces/internal/space"
@@ -33,7 +34,8 @@ const (
 const (
 	reposPaneNumerator   = 3
 	reposPaneDenominator = 5
-	listPaneGap          = 1
+	listPaneGap          = 2
+	minSideBySideWidth   = 80
 )
 
 type repoItem struct {
@@ -130,6 +132,7 @@ type RepositoryPage struct {
 	NameIdx     int
 	Confirming  bool
 	Pending     string
+	SideBySide  bool
 	Err         error
 }
 
@@ -186,7 +189,7 @@ func spaceHelpKeys() []key.Binding {
 }
 
 func (p *RepositoryPage) updateTitles() {
-	repoTitle := "Repositories — " + p.Dir
+	repoTitle := "Repositories — " + filepath.Base(p.Dir)
 	spaceTitle := "Spaces"
 	if p.Focus == focusRepos {
 		repoTitle = "▸ " + repoTitle
@@ -294,10 +297,16 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 		h, v := docStyle.GetFrameSize()
 		w := msg.Width - h
 		total := msg.Height - v
+		p.SideBySide = w >= minSideBySideWidth
+		if p.SideBySide {
+			reposW := (w - listPaneGap) * reposPaneNumerator / reposPaneDenominator
+			p.List.SetSize(reposW, total)
+			p.Spaces.SetSize(w-listPaneGap-reposW, total)
+			return p, nil
+		}
 		reposH := total * reposPaneNumerator / reposPaneDenominator
-		spacesH := total - reposH - listPaneGap
 		p.List.SetSize(w, reposH)
-		p.Spaces.SetSize(w, spacesH)
+		p.Spaces.SetSize(w, total-reposH-listPaneGap)
 		return p, nil
 
 	case cloneDoneMsg:
@@ -494,6 +503,14 @@ func (p *RepositoryPage) View() string {
 
 	default:
 		view := p.List.View() + "\n" + p.Spaces.View()
+		if p.SideBySide {
+			view = lipgloss.JoinHorizontal(
+				lipgloss.Top,
+				p.List.View(),
+				strings.Repeat(" ", listPaneGap),
+				p.Spaces.View(),
+			)
+		}
 		if p.Confirming {
 			view += "\n" + confirmStyle.Render(fmt.Sprintf("Delete space %q? This permanently removes the folder and all its repos.  y / n", p.Pending))
 		} else if p.Err != nil {

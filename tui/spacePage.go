@@ -155,7 +155,16 @@ func scanRepo(repoPath, branch string, merge bool) repoResult {
 	}
 
 	res.Behind = git.Behind(repoPath, base)
-	added, deleted := git.DiffStat(repoPath, base, branch)
+
+	added, deleted, err := git.DiffStat(repoPath, base, branch)
+	if err != nil {
+		if res.Status == "" {
+			res.Status = "diff error"
+		}
+		res.Diff = "—"
+		return res
+	}
+
 	res.Diff = fmt.Sprintf("+%d -%d", added, deleted)
 	return res
 }

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -25,28 +26,30 @@ func Merge(repo, ref string) error {
 
 func BaseBranch(repo string) string {
 	for _, b := range []string{"main", "master"} {
-		if exec.Command("git", "-C", repo, "rev-parse", "--verify", b).Run() == nil {
-			return b
+		for _, ref := range []string{"refs/heads/" + b, "refs/remotes/origin/" + b} {
+			if exec.Command("git", "-C", repo, "rev-parse", "--verify", ref).Run() == nil {
+				return b
+			}
 		}
 	}
 	return ""
 }
 
 func Behind(repo, base string) bool {
-	out, err := exec.Command("git", "-C", repo, "rev-list", "--count", "HEAD..origin/"+base).Output()
+	out, err := output(exec.Command("git", "-C", repo, "rev-list", "--count", "HEAD..origin/"+base))
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) != "0"
+	return strings.TrimSpace(out) != "0"
 }
 
-func DiffStat(repo, base, branch string) (added, deleted int) {
-	out, err := exec.Command("git", "-C", repo, "diff", "--numstat", base, branch).Output()
+func DiffStat(repo, base, branch string) (added, deleted int, err error) {
+	out, err := output(exec.Command("git", "-C", repo, "diff", "--numstat", "origin/"+base, branch))
 	if err != nil {
-		return 0, 0
+		return 0, 0, err
 	}
 
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -56,7 +59,22 @@ func DiffStat(repo, base, branch string) (added, deleted int) {
 		added += a
 		deleted += d
 	}
-	return added, deleted
+	return added, deleted, nil
+}
+
+func output(cmd *exec.Cmd) (string, error) {
+	out, err := cmd.Output()
+	if err == nil {
+		return string(out), nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
+	}
+	return "", err
 }
 
 func run(cmd *exec.Cmd) error {
