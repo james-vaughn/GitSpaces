@@ -26,12 +26,12 @@ type Model struct {
 	Height int
 }
 
-func Run() error {
-	root := &Model{
-		Stack: []Page{newRepositoryPage()},
+func Run(root string) error {
+	m := &Model{
+		Stack: []Page{newRepositoryPage(root)},
 	}
 
-	p := tea.NewProgram(root)
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		return err
 	}

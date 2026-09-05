@@ -3,8 +3,6 @@ package tui
 import (
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +10,9 @@ import (
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/james-vaughn/GitSpaces/internal/git"
+	"github.com/james-vaughn/GitSpaces/internal/space"
 )
 
 type pageMode int
@@ -30,8 +31,6 @@ const (
 )
 
 const (
-	spacesFolder = "Spaces"
-
 	reposPaneNumerator   = 3
 	reposPaneDenominator = 5
 	listPaneGap          = 1
@@ -134,13 +133,10 @@ type RepositoryPage struct {
 	Err         error
 }
 
-func newRepositoryPage() *RepositoryPage {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, "Git")
-
+func newRepositoryPage(dir string) *RepositoryPage {
 	selected := map[string]bool{}
 
-	repos := list.New(readDirItems(dir), repoDelegate{Selected: selected}, 0, 0)
+	repos := list.New(repoItems(dir), repoDelegate{Selected: selected}, 0, 0)
 	repos.SetShowStatusBar(true)
 	repos.SetFilteringEnabled(true)
 	repos.Styles.Title = headerStyle
@@ -148,7 +144,7 @@ func newRepositoryPage() *RepositoryPage {
 	repos.AdditionalShortHelpKeys = repoHelpKeys
 	repos.AdditionalFullHelpKeys = repoHelpKeys
 
-	spaces := list.New(readSpaceItems(dir), spaceDelegate{}, 0, 0)
+	spaces := list.New(spaceItems(dir), spaceDelegate{}, 0, 0)
 	spaces.SetShowStatusBar(true)
 	spaces.SetFilteringEnabled(true)
 	spaces.Styles.Title = headerStyle
@@ -201,58 +197,22 @@ func (p *RepositoryPage) updateTitles() {
 	p.Spaces.Title = spaceTitle
 }
 
-func readDirItems(dir string) []list.Item {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-
-	var items []list.Item
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == spacesFolder {
-			continue
-		}
-		if !isGitRepo(filepath.Join(dir, e.Name())) {
-			continue
-		}
-		items = append(items, repoItem{Name: e.Name(), IsDir: true})
+func repoItems(root string) []list.Item {
+	names := space.Repos(root)
+	items := make([]list.Item, len(names))
+	for i, n := range names {
+		items[i] = repoItem{Name: n, IsDir: true}
 	}
 	return items
 }
 
-func isGitRepo(path string) bool {
-	_, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil
-}
-
-func readSpaceItems(root string) []list.Item {
-	entries, err := os.ReadDir(filepath.Join(root, spacesFolder))
-	if err != nil {
-		return nil
-	}
-
-	var items []list.Item
-	for _, e := range entries {
-		if e.IsDir() {
-			items = append(items, spaceItem{Name: e.Name()})
-		}
+func spaceItems(root string) []list.Item {
+	names := space.Names(root)
+	items := make([]list.Item, len(names))
+	for i, n := range names {
+		items[i] = spaceItem{Name: n}
 	}
 	return items
-}
-
-func readSpaceRepos(spaceDir string) []string {
-	entries, err := os.ReadDir(spaceDir)
-	if err != nil {
-		return nil
-	}
-
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	return names
 }
 
 func (p *RepositoryPage) selectedNames() []string {
@@ -268,24 +228,11 @@ func (p *RepositoryPage) selectedNames() []string {
 func (p *RepositoryPage) spaceOptions() []spaceOption {
 	sel := p.selectedNames()
 	var opts []spaceOption
-	for _, item := range readSpaceItems(p.Dir) {
-		name := item.(spaceItem).Name
-		opts = append(opts, spaceOption{Name: name, Disabled: allCloned(p.Dir, name, sel)})
+	for _, name := range space.Names(p.Dir) {
+		disabled := len(sel) > 0 && space.ContainsRepos(p.Dir, name, sel)
+		opts = append(opts, spaceOption{Name: name, Disabled: disabled})
 	}
 	return opts
-}
-
-func allCloned(root, space string, repos []string) bool {
-	if len(repos) == 0 {
-		return false
-	}
-	dir := filepath.Join(root, spacesFolder, space)
-	for _, r := range repos {
-		if _, err := os.Stat(filepath.Join(dir, r)); err != nil {
-			return false
-		}
-	}
-	return true
 }
 
 func firstEnabled(opts []spaceOption) int {
@@ -295,10 +242,6 @@ func firstEnabled(opts []spaceOption) int {
 		}
 	}
 	return 0
-}
-
-func deleteSpace(root, name string) error {
-	return os.RemoveAll(filepath.Join(root, spacesFolder, name))
 }
 
 func (p *RepositoryPage) nameMove(delta int) {
@@ -318,27 +261,23 @@ func (p *RepositoryPage) nameMove(delta int) {
 
 func cloneCmd(root, name string, repos []string) tea.Cmd {
 	return func() tea.Msg {
-		spaceDir := filepath.Join(root, spacesFolder, name)
-		if err := os.MkdirAll(spaceDir, 0o755); err != nil {
+		spaceDir, err := space.Create(root, name)
+		if err != nil {
 			return cloneDoneMsg{Name: name, Err: err}
 		}
 
 		for _, r := range repos {
-			src := filepath.Join(root, r)
-			dst := filepath.Join(spaceDir, r)
-
-			if _, err := os.Stat(dst); err == nil {
+			dst := space.RepoPath(spaceDir, r)
+			if space.Exists(dst) {
 				continue
 			}
 
-			clone := exec.Command("git", "clone", src, dst)
-			if out, err := clone.CombinedOutput(); err != nil {
-				return cloneDoneMsg{Name: name, Err: fmt.Errorf("clone %s: %w: %s", r, err, strings.TrimSpace(string(out)))}
+			if err := git.Clone(filepath.Join(root, r), dst); err != nil {
+				return cloneDoneMsg{Name: name, Err: fmt.Errorf("clone %s: %w", r, err)}
 			}
 
-			checkout := exec.Command("git", "-C", dst, "checkout", "-B", name)
-			if out, err := checkout.CombinedOutput(); err != nil {
-				return cloneDoneMsg{Name: name, Err: fmt.Errorf("checkout %s in %s: %w: %s", name, r, err, strings.TrimSpace(string(out)))}
+			if err := git.Checkout(dst, name); err != nil {
+				return cloneDoneMsg{Name: name, Err: fmt.Errorf("checkout %s in %s: %w", name, r, err)}
 			}
 		}
 
@@ -367,9 +306,9 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 			p.Err = msg.Err
 			return p, nil
 		}
-		spaceDir := filepath.Join(p.Dir, spacesFolder, msg.Name)
-		refresh := p.Spaces.SetItems(readSpaceItems(p.Dir))
-		return p, tea.Batch(refresh, pushPage(newSpacePage(spaceDir, msg.Name, readSpaceRepos(spaceDir))))
+		spaceDir := space.Path(p.Dir, msg.Name)
+		refresh := p.Spaces.SetItems(spaceItems(p.Dir))
+		return p, tea.Batch(refresh, pushPage(newSpacePage(spaceDir, msg.Name, space.ReposIn(spaceDir))))
 
 	case tea.KeyPressMsg:
 		switch p.Mode {
@@ -429,12 +368,12 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 			if p.Confirming {
 				switch msg.String() {
 				case "y", "Y":
-					if err := deleteSpace(p.Dir, p.Pending); err != nil {
+					if err := space.Delete(p.Dir, p.Pending); err != nil {
 						p.Err = err
 					}
 					p.Confirming = false
 					p.Pending = ""
-					return p, p.Spaces.SetItems(readSpaceItems(p.Dir))
+					return p, p.Spaces.SetItems(spaceItems(p.Dir))
 				case "n", "N", "esc":
 					p.Confirming = false
 					p.Pending = ""
@@ -497,8 +436,8 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 					return p, p.Input.Focus()
 				}
 				if it, ok := p.Spaces.SelectedItem().(spaceItem); ok {
-					spaceDir := filepath.Join(p.Dir, spacesFolder, it.Name)
-					return p, pushPage(newSpacePage(spaceDir, it.Name, readSpaceRepos(spaceDir)))
+					spaceDir := space.Path(p.Dir, it.Name)
+					return p, pushPage(newSpacePage(spaceDir, it.Name, space.ReposIn(spaceDir)))
 				}
 				return p, nil
 			}

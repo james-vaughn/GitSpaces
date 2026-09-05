@@ -2,14 +2,12 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
 
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/james-vaughn/GitSpaces/internal/git"
+	"github.com/james-vaughn/GitSpaces/internal/space"
 )
 
 const (
@@ -117,7 +115,7 @@ func (p *SpacePage) selectedRepo() string {
 }
 
 func (p *SpacePage) deleteRepo(repo string) error {
-	if err := os.RemoveAll(filepath.Join(p.SpaceDir, repo)); err != nil {
+	if err := space.RemoveRepo(p.SpaceDir, repo); err != nil {
 		return err
 	}
 	for i, r := range p.Repos {
@@ -135,68 +133,31 @@ func scanCmd(spaceDir, branch string, repos []string, merge bool) tea.Cmd {
 	return func() tea.Msg {
 		results := make(map[string]repoResult, len(repos))
 		for _, r := range repos {
-			results[r] = scanRepo(filepath.Join(spaceDir, r), branch, merge)
+			results[r] = scanRepo(space.RepoPath(spaceDir, r), branch, merge)
 		}
 		return scanDoneMsg{Results: results, Merged: merge}
 	}
 }
 
 func scanRepo(repoPath, branch string, merge bool) repoResult {
-	base := baseBranch(repoPath)
+	base := git.BaseBranch(repoPath)
 	if base == "" {
 		return repoResult{Status: "no base branch", Diff: "—"}
 	}
 
 	var res repoResult
-	if err := exec.Command("git", "-C", repoPath, "fetch", "origin").Run(); err != nil {
+	if err := git.Fetch(repoPath); err != nil {
 		res.Status = "fetch error"
 	} else if merge {
-		if err := exec.Command("git", "-C", repoPath, "merge", "origin/"+base).Run(); err != nil {
+		if err := git.Merge(repoPath, "origin/"+base); err != nil {
 			res.Status = "merge error"
 		}
 	}
 
-	res.Behind = isBehind(repoPath, base)
-	res.Diff = diffStat(repoPath, base, branch)
+	res.Behind = git.Behind(repoPath, base)
+	added, deleted := git.DiffStat(repoPath, base, branch)
+	res.Diff = fmt.Sprintf("+%d -%d", added, deleted)
 	return res
-}
-
-func baseBranch(repoPath string) string {
-	for _, b := range []string{"main", "master"} {
-		if exec.Command("git", "-C", repoPath, "rev-parse", "--verify", b).Run() == nil {
-			return b
-		}
-	}
-	return ""
-}
-
-func isBehind(repoPath, base string) bool {
-	out, err := exec.Command("git", "-C", repoPath, "rev-list", "--count", "HEAD..origin/"+base).Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != "0"
-}
-
-func diffStat(repoPath, base, branch string) string {
-	out, err := exec.Command("git", "-C", repoPath, "diff", "--numstat", base, branch).Output()
-	if err != nil {
-		return "—"
-	}
-
-	added, deleted := 0, 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		a, _ := strconv.Atoi(fields[0])
-		d, _ := strconv.Atoi(fields[1])
-		added += a
-		deleted += d
-	}
-
-	return fmt.Sprintf("+%d -%d", added, deleted)
 }
 
 func (p *SpacePage) Init() tea.Cmd {
