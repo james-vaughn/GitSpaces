@@ -241,6 +241,8 @@ func (p *SpacePage) Update(msg tea.Msg) (Page, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "esc":
+			return p, tea.Quit
 		case "left", "h":
 			return p, popPage
 		case "u":

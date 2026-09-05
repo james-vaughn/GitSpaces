@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -208,21 +207,22 @@ func readDirItems(dir string) []list.Item {
 		return nil
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir() != entries[j].IsDir() {
-			return entries[i].IsDir()
-		}
-		return entries[i].Name() < entries[j].Name()
-	})
-
-	items := make([]list.Item, 0, len(entries))
+	var items []list.Item
 	for _, e := range entries {
-		if e.IsDir() && e.Name() == spacesFolder {
+		if !e.IsDir() || e.Name() == spacesFolder {
 			continue
 		}
-		items = append(items, repoItem{Name: e.Name(), IsDir: e.IsDir()})
+		if !isGitRepo(filepath.Join(dir, e.Name())) {
+			continue
+		}
+		items = append(items, repoItem{Name: e.Name(), IsDir: true})
 	}
 	return items
+}
+
+func isGitRepo(path string) bool {
+	_, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil
 }
 
 func readSpaceItems(root string) []list.Item {
@@ -451,6 +451,11 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 			}
 
 			switch msg.String() {
+			case "esc":
+				if focused.FilterState() == list.Unfiltered {
+					return p, tea.Quit
+				}
+
 			case "backspace", "delete":
 				if p.Focus == focusSpaces {
 					if it, ok := p.Spaces.SelectedItem().(spaceItem); ok {
