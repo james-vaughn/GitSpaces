@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
@@ -28,16 +29,18 @@ type SpacePage struct {
 	Repos    []string
 	Results  map[string]repoResult
 
-	Confirming bool
-	Pending    string
-	Updating   bool
-	Checking   bool
-	Err        error
+	Confirming   bool
+	Pending      string
+	Updating     bool
+	Checking     bool
+	PendingScans int
+	Err          error
 }
 
-type scanDoneMsg struct {
-	Results map[string]repoResult
-	Merged  bool
+type repoScanDoneMsg struct {
+	Repo   string
+	Result repoResult
+	Merged bool
 }
 
 func newSpacePage(spaceDir, name string, repos []string) *SpacePage {
@@ -57,12 +60,13 @@ func newSpacePage(spaceDir, name string, repos []string) *SpacePage {
 	t.SetStyles(styles)
 
 	p := &SpacePage{
-		Name:     name,
-		SpaceDir: spaceDir,
-		Table:    t,
-		Repos:    repos,
-		Results:  map[string]repoResult{},
-		Checking: true,
+		Name:         name,
+		SpaceDir:     spaceDir,
+		Table:        t,
+		Repos:        repos,
+		Results:      map[string]repoResult{},
+		Checking:     len(repos) > 0,
+		PendingScans: len(repos),
 	}
 	p.rebuildRows()
 	return p
@@ -129,14 +133,22 @@ func (p *SpacePage) deleteRepo(repo string) error {
 	return nil
 }
 
-func scanCmd(spaceDir, branch string, repos []string, merge bool) tea.Cmd {
+func scanCmd(spaceDir, branch, repo string, merge bool) tea.Cmd {
 	return func() tea.Msg {
-		results := make(map[string]repoResult, len(repos))
-		for _, r := range repos {
-			results[r] = scanRepo(space.RepoPath(spaceDir, r), branch, merge)
+		return repoScanDoneMsg{
+			Repo:   repo,
+			Result: scanRepo(space.RepoPath(spaceDir, repo), branch, merge),
+			Merged: merge,
 		}
-		return scanDoneMsg{Results: results, Merged: merge}
 	}
+}
+
+func scanAllCmd(spaceDir, branch string, repos []string, merge bool) tea.Cmd {
+	cmds := make([]tea.Cmd, len(repos))
+	for i, r := range repos {
+		cmds[i] = scanCmd(spaceDir, branch, r, merge)
+	}
+	return tea.Batch(cmds...)
 }
 
 func scanRepo(repoPath, branch string, merge bool) repoResult {
@@ -170,7 +182,7 @@ func scanRepo(repoPath, branch string, merge bool) repoResult {
 }
 
 func (p *SpacePage) Init() tea.Cmd {
-	return scanCmd(p.SpaceDir, p.Name, p.Repos, false)
+	return scanAllCmd(p.SpaceDir, p.Name, p.Repos, false)
 }
 
 func (p *SpacePage) Update(msg tea.Msg) (Page, tea.Cmd) {
@@ -182,13 +194,21 @@ func (p *SpacePage) Update(msg tea.Msg) (Page, tea.Cmd) {
 		p.Table.SetHeight(msg.Height - v - titleRows - footerRows)
 		return p, nil
 
-	case scanDoneMsg:
-		if msg.Merged {
-			p.Updating = false
-		} else {
-			p.Checking = false
+	case repoScanDoneMsg:
+		if p.PendingScans > 0 {
+			p.PendingScans--
 		}
-		p.Results = msg.Results
+		if p.PendingScans == 0 {
+			if msg.Merged {
+				p.Updating = false
+			} else {
+				p.Checking = false
+			}
+		}
+		if !slices.Contains(p.Repos, msg.Repo) {
+			return p, nil
+		}
+		p.Results[msg.Repo] = msg.Result
 		p.rebuildRows()
 		return p, nil
 
@@ -216,12 +236,13 @@ func (p *SpacePage) Update(msg tea.Msg) (Page, tea.Cmd) {
 		case "left", "h":
 			return p, popPage
 		case "u":
-			if len(p.Repos) > 0 {
-				p.Updating = true
-				p.Err = nil
-				return p, scanCmd(p.SpaceDir, p.Name, p.Repos, true)
+			if p.Checking || len(p.Repos) == 0 {
+				return p, nil
 			}
-			return p, nil
+			p.Updating = true
+			p.PendingScans = len(p.Repos)
+			p.Err = nil
+			return p, scanAllCmd(p.SpaceDir, p.Name, p.Repos, true)
 		case "backspace", "delete":
 			if repo := p.selectedRepo(); repo != "" {
 				p.Confirming = true

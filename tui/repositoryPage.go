@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -51,8 +52,8 @@ type spaceItem struct {
 
 func (i spaceItem) FilterValue() string { return i.Name }
 
-type cloneDoneMsg struct {
-	Name string
+type repoCloneDoneMsg struct {
+	Repo string
 	Err  error
 }
 
@@ -133,6 +134,9 @@ type RepositoryPage struct {
 	Confirming  bool
 	Pending     string
 	SideBySide  bool
+	CloneName   string
+	CloneRepos  []string
+	CloneDone   map[string]error
 	Err         error
 }
 
@@ -262,30 +266,33 @@ func (p *RepositoryPage) nameMove(delta int) {
 	}
 }
 
-func cloneCmd(root, name string, repos []string) tea.Cmd {
+func cloneCmd(root, name, repo string) tea.Cmd {
 	return func() tea.Msg {
-		spaceDir, err := space.Create(root, name)
-		if err != nil {
-			return cloneDoneMsg{Name: name, Err: err}
+		dst := space.RepoPath(space.Path(root, name), repo)
+		if space.Exists(dst) {
+			return repoCloneDoneMsg{Repo: repo}
 		}
 
-		for _, r := range repos {
-			dst := space.RepoPath(spaceDir, r)
-			if space.Exists(dst) {
-				continue
-			}
-
-			if err := git.Clone(filepath.Join(root, r), dst); err != nil {
-				return cloneDoneMsg{Name: name, Err: fmt.Errorf("clone %s: %w", r, err)}
-			}
-
-			if err := git.Checkout(dst, name); err != nil {
-				return cloneDoneMsg{Name: name, Err: fmt.Errorf("checkout %s in %s: %w", name, r, err)}
-			}
+		if err := git.Clone(filepath.Join(root, repo), dst); err != nil {
+			return repoCloneDoneMsg{Repo: repo, Err: fmt.Errorf("clone %s: %w", repo, err)}
 		}
 
-		return cloneDoneMsg{Name: name}
+		if err := git.Checkout(dst, name); err != nil {
+			return repoCloneDoneMsg{Repo: repo, Err: fmt.Errorf("checkout %s in %s: %w", name, repo, err)}
+		}
+
+		return repoCloneDoneMsg{Repo: repo}
 	}
+}
+
+func (p *RepositoryPage) cloneErrors() []error {
+	var errs []error
+	for _, r := range p.CloneRepos {
+		if err := p.CloneDone[r]; err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
 }
 
 func (p *RepositoryPage) Init() tea.Cmd { return nil }
@@ -309,15 +316,21 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 		p.Spaces.SetSize(w, total-reposH-listPaneGap)
 		return p, nil
 
-	case cloneDoneMsg:
-		p.Mode = modeBrowse
-		if msg.Err != nil {
-			p.Err = msg.Err
+	case repoCloneDoneMsg:
+		p.CloneDone[msg.Repo] = msg.Err
+		if len(p.CloneDone) < len(p.CloneRepos) {
 			return p, nil
 		}
-		spaceDir := space.Path(p.Dir, msg.Name)
+
+		p.Mode = modeBrowse
 		refresh := p.Spaces.SetItems(spaceItems(p.Dir))
-		return p, tea.Batch(refresh, pushPage(newSpacePage(spaceDir, msg.Name, space.ReposIn(spaceDir))))
+		if errs := p.cloneErrors(); len(errs) > 0 {
+			p.Err = errors.Join(errs...)
+			return p, refresh
+		}
+
+		spaceDir := space.Path(p.Dir, p.CloneName)
+		return p, tea.Batch(refresh, pushPage(newSpacePage(spaceDir, p.CloneName, space.ReposIn(spaceDir))))
 
 	case tea.KeyPressMsg:
 		switch p.Mode {
@@ -361,10 +374,23 @@ func (p *RepositoryPage) Update(msg tea.Msg) (Page, tea.Cmd) {
 				if name == "" {
 					return p, nil
 				}
+				if _, err := space.Create(p.Dir, name); err != nil {
+					p.Err = err
+					return p, nil
+				}
+
 				p.Mode = modeCloning
 				p.Err = nil
 				p.Input.Blur()
-				return p, cloneCmd(p.Dir, name, p.selectedNames())
+				p.CloneName = name
+				p.CloneRepos = p.selectedNames()
+				p.CloneDone = map[string]error{}
+
+				cmds := make([]tea.Cmd, len(p.CloneRepos))
+				for i, r := range p.CloneRepos {
+					cmds[i] = cloneCmd(p.Dir, name, r)
+				}
+				return p, tea.Batch(cmds...)
 			}
 			if p.NameOnInput {
 				var cmd tea.Cmd
@@ -498,8 +524,19 @@ func (p *RepositoryPage) View() string {
 		return docStyle.Render(body)
 
 	case modeCloning:
-		name := strings.TrimSpace(p.Input.Value())
-		return docStyle.Render(promptStyle.Render("Cloning repositories into " + name + "…"))
+		body := promptStyle.Render("Cloning repositories into "+p.CloneName+"…") + "\n\n"
+		for _, r := range p.CloneRepos {
+			err, done := p.CloneDone[r]
+			switch {
+			case !done:
+				body += hintStyle.Render("  … "+r) + "\n"
+			case err != nil:
+				body += errStyle.Render("  ✗ "+r) + "\n"
+			default:
+				body += okStyle.Render("  ✓ "+r) + "\n"
+			}
+		}
+		return docStyle.Render(body)
 
 	default:
 		view := p.List.View() + "\n" + p.Spaces.View()
